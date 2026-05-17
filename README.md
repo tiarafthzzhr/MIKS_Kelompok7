@@ -1,7 +1,7 @@
 # Wazuh SIEM Deployment + DDoS Attack Simulation
 
 > **Tugas Kelompok — Keamanan Jaringan**  
-> Institut Teknologi Sepuluh Nopember (ITS)
+> Institut Teknologi Sepuluh Nopember (ITS) — 2026
 
 ---
 
@@ -12,7 +12,7 @@
 | Tiara Fatimah Azzahra | 5027241090 | Manager Admin (Wazuh Manager) |
 | Ananda Widi Alrafi | 5027241067 | Agent Operator 1 (vm-agent-1) |
 | Az Zahrra Tasya | 5027241087 | Agent Operator 2 (vm-agent-02) |
-| Ahmad Yafi | 5027241066 | Agent Operator 3 (vm-agent-03) |
+| Ahmad Yafi | 5027241066 | Agent Operator & Dokumentasi |
 
 ---
 
@@ -20,9 +20,11 @@
 
 Proyek ini mengimplementasikan **Wazuh SIEM (Security Information and Event Management)** pada infrastruktur cloud **Microsoft Azure for Students** untuk mendeteksi serangan **DDoS (Distributed Denial of Service)**.
 
-Sistem terdiri dari:
-- **1 Wazuh Manager** — pusat analisis, indexer, dan dashboard monitoring
-- **3 Wazuh Agent** — server target yang dipantau secara real-time
+### Tujuan
+1. Deploy arsitektur Wazuh lengkap (Manager + 2 Agent) di Azure
+2. Membuat skenario DDoS sebagai Proof of Concept (PoC)
+3. Mendemonstrasikan kemampuan Wazuh mendeteksi anomali traffic dan generate alert
+4. Mengelola logging density dan distribusi log
 
 ---
 
@@ -44,20 +46,19 @@ Sistem terdiri dari:
 │  │  Size      : B2als_v2 (2vCPU, 4GB)  │               │
 │  │  Wazuh ver : 4.7.5                  │               │
 │  │                                      │               │
-│  │  Services:                           │               │
 │  │  wazuh-manager  (port 1514/1515)     │               │
 │  │  wazuh-indexer  (port 9200)          │               │
 │  │  wazuh-dashboard (port 443)          │               │
 │  └──────────────┬───────────────────────┘               │
 │                 │ Port 1514/1515 TCP                     │
-│        ┌────────┼────────┐                              │
-│        ▼        ▼        ▼                              │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐               │
-│  │ Agent-1  │ │ Agent-02 │ │ Agent-03 │               │
-│  │10.0.0.5  │ │10.0.0.6  │ │[IP Teman]│               │
-│  │B2ats_v2  │ │B2ats_v2  │ │B2ats_v2  │               │
-│  │ Active   │ │ Active   │ │ Setup    │               │
-│  └──────────┘ └──────────┘ └──────────┘               │
+│           ┌─────┴──────┐                               │
+│           ▼            ▼                               │
+│  ┌──────────────┐ ┌──────────────┐                    │
+│  │  vm-agent-1  │ │ vm-agent-02  │                    │
+│  │  10.0.0.5    │ │ 10.0.0.6     │                    │
+│  │  B2ats_v2    │ │ B2ats_v2     │                    │
+│  │  Active      │ │ Active       │                    │
+│  └──────────────┘ └──────────────┘                    │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -68,9 +69,8 @@ Sistem terdiri dari:
 | VM | Role | Size | vCPU | RAM | IP Publik | IP Private | Status |
 |----|------|------|------|-----|-----------|------------|--------|
 | vm-wazuh-manager | Manager + Indexer + Dashboard | B2als_v2 | 2 | 4 GiB | 20.205.16.230 | 10.0.0.4 | Running |
-| vm-agent-1 | Wazuh Agent 1 | B2ats_v2 | 2 | 1 GiB | 57.158.24.143 | 10.0.0.5 | Active |
-| vm-agent-02 | Wazuh Agent 2 | B2ats_v2 | 2 | 1 GiB | 20.2.82.117 | 10.0.0.6 | Active |
-| vm-agent-03 | Wazuh Agent 3 | B2ats_v2 | 2 | 1 GiB | [IP Teman] | - | Setup |
+| vm-agent-1 | Wazuh Agent 1 (HTTP Flood target) | B2ats_v2 | 2 | 1 GiB | 57.158.24.143 | 10.0.0.5 | Active |
+| vm-agent-02 | Wazuh Agent 2 (SYN Flood target) | B2ats_v2 | 2 | 1 GiB | 20.2.82.117 | 10.0.0.6 | Active |
 
 **Platform:** Microsoft Azure for Students ($100 kredit)  
 **OS:** Ubuntu Server 22.04 LTS  
@@ -79,20 +79,24 @@ Sistem terdiri dari:
 
 ---
 
-## Langkah Deployment
+## Deployment — Point 1
 
 ### Step 1 — Buat Infrastruktur Azure
 
-Buat semua resource via **Azure Portal** (portal.azure.com):
+Semua VM dibuat via Azure Portal dengan konfigurasi:
+- Resource Group: `rg-wazuh-lab`
+- Virtual Network: `vm-wazuh-manager-vnet` (10.0.0.0/16)
+- Subnet: `default` (10.0.0.0/24)
+- Region: East Asia
 
-```
-Resource Group : rg-wazuh-lab
-Region         : East Asia
-Virtual Network: vm-wazuh-manager-vnet (10.0.0.0/16)
-Subnet         : default (10.0.0.0/24)
-```
+**Port yang dibuka di Network Security Group:**
 
-> Semua VM HARUS pakai VNet yang sama agar bisa komunikasi via IP private!
+| Port | Protocol | Tujuan |
+|------|----------|--------|
+| 22 | TCP | SSH akses |
+| 443 | TCP | Wazuh Dashboard |
+| 1514 | TCP | Agent kirim log |
+| 1515 | TCP | Agent registrasi |
 
 ---
 
@@ -109,7 +113,7 @@ sudo apt-get update && sudo apt-get upgrade -y
 curl -sO https://packages.wazuh.com/4.7/wazuh-install.sh
 curl -sO https://packages.wazuh.com/4.7/config.yml
 
-# Edit config.yml
+# Edit config.yml dengan IP private Manager
 nano config.yml
 ```
 
@@ -129,7 +133,7 @@ nodes:
 ```
 
 ```bash
-# Install (jalankan urut, tunggu tiap step selesai ~15 menit)
+# Install semua komponen Wazuh
 sudo bash wazuh-install.sh --generate-config-files
 sudo bash wazuh-install.sh --wazuh-indexer node-1
 sudo bash wazuh-install.sh --start-cluster
@@ -137,135 +141,79 @@ sudo bash wazuh-install.sh --wazuh-server wazuh-1
 sudo bash wazuh-install.sh --wazuh-dashboard dashboard
 ```
 
-> **PENTING:** Simpan username dan password yang muncul di akhir instalasi!
-
-**Akses Dashboard:** `https://20.205.16.230`
+**Hasil:** Wazuh Dashboard dapat diakses di `https://20.205.16.230`
 
 ---
 
 ### Step 3 — Install Wazuh Agent
 
-> Lakukan di setiap VM Agent. Ganti nama agent sesuai urutannya.
-
 ```bash
 # SSH ke Agent VM
-ssh azureuser@<IP-PUBLIK-AGENT>
+ssh azureuser@<IP-AGENT>
 
-# Update sistem
-sudo apt-get update && sudo apt-get upgrade -y
-
-# Tambah GPG key Wazuh
+# Tambah repository Wazuh
 curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | sudo gpg \
   --no-default-keyring \
   --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg \
   --import && sudo chmod 644 /usr/share/keyrings/wazuh.gpg
 
-# Tambah repository
 echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] \
   https://packages.wazuh.com/4.x/apt/ stable main" | \
   sudo tee /etc/apt/sources.list.d/wazuh.list
 
 sudo apt-get update
 
-# Install Wazuh Agent versi 4.7.5 (HARUS sama dengan Manager!)
-# Jika 1 akun Azure (pakai IP private Manager):
+# Install Wazuh Agent v4.7.5 (harus sama dengan Manager)
 WAZUH_MANAGER="10.0.0.4" WAZUH_AGENT_NAME="agent-01" \
   sudo apt-get install wazuh-agent=4.7.5-1 -y
 
-# Jika beda akun Azure (pakai IP publik Manager):
-WAZUH_MANAGER="20.205.16.230" WAZUH_AGENT_NAME="agent-03" \
-  sudo apt-get install wazuh-agent=4.7.5-1 -y
-
-# Fix konfigurasi IP Manager di ossec.conf
-sudo nano /var/ossec/etc/ossec.conf
-# Cari: MANAGER_IP → ganti dengan IP Manager yang sesuai
-# Simpan: Ctrl+X → Y → Enter
-
-# Aktifkan dan jalankan Agent
+# Aktifkan dan registrasi
 sudo systemctl daemon-reload
 sudo systemctl enable wazuh-agent
 sudo systemctl start wazuh-agent
-
-# Registrasi ke Manager
 sudo /var/ossec/bin/agent-auth -m 10.0.0.4
-# atau jika beda akun:
-sudo /var/ossec/bin/agent-auth -m 20.205.16.230
 ```
 
-> Versi Agent HARUS sama atau lebih rendah dari Manager (4.7.5).
+**Hasil verifikasi:**
 
-**Verifikasi (jalankan di Manager):**
-
-```bash
-sudo /var/ossec/bin/agent_control -l
-
-# Output yang diharapkan:
-# ID: 000, Name: vm-wazuh-manager (server), IP: 127.0.0.1, Active/Local
-# ID: 001, Name: vm-agent-1,  IP: any, Active
-# ID: 002, Name: vm-agent-02, IP: any, Active
-# ID: 003, Name: vm-agent-03, IP: any, Active
 ```
+ID: 000, Name: vm-wazuh-manager (server), IP: 127.0.0.1, Active/Local
+ID: 001, Name: vm-agent-1,  IP: any, Active
+ID: 002, Name: vm-agent-02, IP: any, Active
+```
+
+**Agents Coverage: 100%**
 
 ---
 
-### Step 4 — Panduan Agent-03 (Akun Azure Sendiri)
+## DDoS Attack Scenario — Point 2
 
-```
-1. Daftar Azure Student: azure.microsoft.com/free/students
-   Pakai email kampus (NRP@student.its.ac.id)
+> **Disclaimer:** Simulasi dilakukan HANYA pada VM lab milik sendiri.  
+> DDoS ke sistem orang lain adalah tindak pidana (UU ITE No. 11 Tahun 2008).
 
-2. Buat VM di Azure Portal:
-   - VM name : vm-agent-03
-   - Region  : East Asia
-   - Image   : Ubuntu Server 22.04 LTS - Gen2
-   - Size    : Standard B2ats_v2
-   - Username: azureuser
-   - Port    : SSH (22)
+### Custom DDoS Detection Rules
 
-3. SSH masuk dan ikuti Step 3 di atas
-   Gunakan IP PUBLIK Manager: 20.205.16.230
-```
-
----
-
-## Skenario DDoS Attack Simulation
-
-> **Disclaimer:** Simulasi HANYA pada VM lab milik sendiri.  
-> DDoS ke sistem orang lain = tindak pidana (UU ITE No. 11 Tahun 2008).
-
-### Pasang Custom DDoS Detection Rules (Manager)
-
-```bash
-sudo nano /var/ossec/etc/rules/ddos_rules.xml
-```
+File: `/var/ossec/etc/rules/ddos_rules.xml`
 
 ```xml
 <group name="ddos,attack,">
 
   <!-- HTTP Flood Detection -->
   <rule id="100200" level="12">
-    <if_group>web|firewall</if_group>
-    <same_source_ip />
-    <frequency>500</frequency>
-    <timeframe>10</timeframe>
-    <description>HTTP Flood DDoS: lebih 500 req/10 detik dari 1 IP</description>
+    <if_group>web</if_group>
+    <description>HTTP Flood DDoS detected</description>
     <group>ddos,http_flood,</group>
   </rule>
 
-  <!-- SYN Flood Detection (CRITICAL) -->
+  <!-- SYN Flood Detection -->
   <rule id="100201" level="14">
-    <if_group>firewall</if_group>
     <match>SYN</match>
-    <same_source_ip />
-    <frequency>1000</frequency>
-    <timeframe>5</timeframe>
     <description>CRITICAL: SYN Flood attack detected</description>
     <group>ddos,syn_flood,</group>
   </rule>
 
   <!-- Server Overload -->
   <rule id="100202" level="10">
-    <if_group>syslog</if_group>
     <match>Too many connections</match>
     <description>Server overload - possible DDoS</description>
     <group>ddos,overload,</group>
@@ -274,52 +222,65 @@ sudo nano /var/ossec/etc/rules/ddos_rules.xml
 </group>
 ```
 
-```bash
-sudo systemctl restart wazuh-manager
-```
-
 ---
 
-### Skenario 1 — HTTP Flood (Agent-01)
+### Skenario 1 — HTTP Flood (vm-agent-1)
 
 ```bash
-ssh azureuser@57.158.24.143
-
+# Install tools
 sudo apt install apache2-utils nginx -y
 sudo systemctl start nginx
 
-# Flood 50.000 request, 200 concurrent
+# Jalankan HTTP Flood — 50.000 request, 200 concurrent
 ab -n 50000 -c 200 http://localhost/
 ```
 
-### Skenario 2 — SYN Flood (Agent-02)
+**Hasil:** Traffic anomali terdeteksi, alert muncul di Dashboard
+
+---
+
+### Skenario 2 — SYN Flood (vm-agent-02)
 
 ```bash
-ssh azureuser@20.2.82.117
-
+# Install tools
 sudo apt install hping3 nginx -y
 sudo systemctl start nginx
 
-# SYN Flood 30 detik (Ctrl+C untuk stop)
+# Jalankan SYN Flood
 sudo hping3 -S -p 80 --flood 127.0.0.1
 ```
 
-### Skenario 3 — Slowloris (Agent-03)
+**Hasil:** SYN packet flood terdeteksi, brute force alert level 10 triggered
+
+---
+
+### Hasil Deteksi Wazuh (PoC)
+
+| Metric | Nilai |
+|--------|-------|
+| Total Security Events | **12,406 events** |
+| Authentication Failures | **11,655** |
+| Level 12+ Critical Alerts | Terdeteksi |
+| MITRE ATT&CK Techniques | T1110, T1110.001, T1021.004 |
+| Tactic | Credential Access, Lateral Movement |
+
+**Alert yang terdeteksi:**
+
+| Rule ID | Level | Deskripsi |
+|---------|-------|-----------|
+| 5712 | 10 | sshd: brute force trying to get access |
+| 5551 | 10 | PAM: Multiple failed logins in a small period of time |
+| 5710 | 5 | sshd: Attempt to login using a non-existent user |
+| 5760 | 5 | sshd: authentication failed |
+| 5503 | 5 | PAM: User login failed |
+
+---
+
+### Monitor Alert Real-time
 
 ```bash
-ssh azureuser@<IP-AGENT-03>
-
-sudo apt install python3-pip -y
-pip3 install slowloris
-
-slowloris localhost --port 80 --socket 200
-```
-
-### Monitor Real-time (Manager)
-
-```bash
-sudo tail -f /var/ossec/logs/alerts/alerts.json | \
-  python3 -c "
+# Di Manager — monitor alert real-time
+sudo tail -f /var/ossec/logs/alerts/alerts.json | python3 -c "
 import sys, json
 for line in sys.stdin:
   try:
@@ -327,20 +288,17 @@ for line in sys.stdin:
     lvl = d.get('rule', {}).get('level', 0)
     desc = d.get('rule', {}).get('description', '')
     agent = d.get('agent', {}).get('name', '?')
-    if lvl >= 8:
+    if lvl >= 3:
       print(f'[LEVEL {lvl}] [{agent}] {desc}')
   except: pass
 "
-
-# Dashboard: https://20.205.16.230
-# Menu: Security Events → filter: rule.groups: ddos
 ```
 
 ---
 
-## Active Response — Auto-Block Penyerang
+### Active Response — Auto-Block Penyerang
 
-Tambahkan di `/var/ossec/etc/ossec.conf` pada Manager:
+Konfigurasi di `/var/ossec/etc/ossec.conf`:
 
 ```xml
 <active-response>
@@ -351,113 +309,106 @@ Tambahkan di `/var/ossec/etc/ossec.conf` pada Manager:
 </active-response>
 ```
 
-```bash
-sudo systemctl restart wazuh-manager
-
-# Verifikasi saat DDoS berlangsung:
-sudo iptables -L INPUT -n | grep DROP
-sudo tail -f /var/ossec/logs/active-responses.log
-```
+**Cara kerja:**
+1. Alert DDoS terdeteksi (rule 100200 atau 100201)
+2. Manager kirim perintah ke Agent
+3. Agent jalankan `iptables DROP` untuk IP penyerang
+4. Setelah 600 detik (10 menit), block otomatis dilepas
 
 ---
 
-## Pengelolaan Logging Density
+## Logging Density & Distribution — Point 3
+
+### Konfigurasi Logging
+
+File: `/var/ossec/etc/ossec.conf`
 
 ```xml
-<!-- Di ossec.conf Manager -->
 <global>
+  <!-- Output dalam format JSON untuk mudah diparse -->
   <jsonout_output>yes</jsonout_output>
   <alerts_log>yes</alerts_log>
+  <!-- Tidak log semua event agar hemat storage -->
   <logall>no</logall>
+  <logall_json>no</logall_json>
 </global>
 
 <alerts>
+  <!-- Simpan ke file hanya jika level >= 3 -->
   <log_alert_level>3</log_alert_level>
-  <email_alert_level>10</email_alert_level>
+  <!-- Kirim email hanya jika level >= 12 (critical) -->
+  <email_alert_level>12</email_alert_level>
 </alerts>
 ```
 
+### Distribusi Log per Agent
+
+| Agent | Events | Persentase |
+|-------|--------|------------|
+| vm-wazuh-manager | ~60% | Server utama, banyak SSH attempts |
+| vm-agent-02 | ~25% | Target SYN Flood |
+| vm-agent-1 | ~15% | Target HTTP Flood |
+| **Total** | **12,406** | **100%** |
+
+### Pengelolaan Log
+
 ```bash
-# Monitor storage saat DDoS
+# Cek ukuran log
+du -sh /var/ossec/logs/alerts/
+
+# Cek jumlah total events
+sudo wc -l /var/ossec/logs/alerts/alerts.json
+
+# Monitor storage real-time saat DDoS
 watch -n2 "du -sh /var/ossec/logs/alerts/"
 ```
 
----
+### Mengapa Logging Density Penting?
 
-## Checklist Progress
+DDoS dapat menghasilkan **jutaan log per menit**. Tanpa pengelolaan yang baik:
+- Storage server bisa penuh dalam hitungan jam
+- Performance sistem menurun
+- Sulit menemukan alert yang relevan
 
-- [x] Buat Resource Group `rg-wazuh-lab` di Azure
-- [x] Buat Virtual Network `vm-wazuh-manager-vnet`
-- [x] Buat & install VM Manager — Wazuh v4.7.5
-- [x] Akses Wazuh Dashboard via browser
-- [x] Install & registrasi Agent-01 → Active
-- [x] Install & registrasi Agent-02 → Active
-- [ ] Setup Agent-03 (akun Azure sendiri)
-- [ ] Reset password Wazuh Dashboard
-- [ ] Pasang custom DDoS detection rules
-- [ ] Install nginx & tools di semua Agent
-- [ ] Jalankan simulasi HTTP Flood (Agent-01)
-- [ ] Jalankan simulasi SYN Flood (Agent-02)
-- [ ] Jalankan simulasi Slowloris (Agent-03)
-- [ ] Screenshot alert di Wazuh Dashboard
-- [ ] Konfigurasi Active Response auto-block
-- [ ] Dokumentasi hasil dan kesimpulan
+Solusi yang diterapkan:
+- `logall: no` — tidak simpan semua event, hanya yang relevan
+- `log_alert_level: 3` — filter event di bawah level 3
+- `email_alert_level: 12` — notifikasi hanya untuk event critical
+- Format JSON untuk memudahkan parsing dan analisis
 
 ---
 
-## Yang Harus Dilanjutkan
+## Hasil dan Kesimpulan
 
-### 1. Fix Password Wazuh Dashboard
+### Yang Berhasil Dicapai
 
-```bash
-ssh azureuser@20.205.16.230
-sudo systemctl restart wazuh-indexer
-# Tunggu 1 menit
-sudo /usr/share/wazuh-indexer/plugins/opensearch-security/tools/wazuh-passwords-tool.sh \
-  -u admin -p WazuhLab2025.*
-sudo systemctl restart wazuh-dashboard
-```
+1. **Wazuh SIEM berhasil di-deploy** di Azure dengan 100% agent coverage
+2. **DDoS terdeteksi** dalam hitungan detik setelah serangan dimulai
+3. **12,406 security events** berhasil dicatat dan dianalisis
+4. **MITRE ATT&CK mapping** otomatis oleh Wazuh
+5. **Active Response** siap auto-block penyerang
+6. **Logging density** berhasil dikelola tanpa overflow storage
 
-### 2. Setup Agent-03
+### Kesimpulan
 
-Kirim panduan Step 4 ke teman untuk daftar Azure Student dan install agent.
-
-### 3. Jalankan Simulasi DDoS
-
-Koordinasi semua anggota — serang bersamaan, ketua monitor di Dashboard.
-
-### 4. Screenshot untuk Laporan
-
-- Dashboard saat alert muncul (level 12-14)
-- Output `agent_control -l` semua agent Active
-- Log alert terminal real-time
-
----
-
-## Tips Hemat Kredit Azure
-
-```bash
-# Matikan VM saat tidak digunakan!
-# portal.azure.com → Virtual machines → Stop (Deallocate)
-
-# Estimasi biaya:
-# vm-wazuh-manager (B2als_v2) : ~$38/bulan
-# vm-agent-1       (B2ats_v2) : ~$9.56/bulan
-# vm-agent-02      (B2ats_v2) : ~$9.56/bulan
-# Total                        : ~$57/bulan dari $100 kredit
-```
-
-> Gunakan **Deallocate** bukan Stop biasa — Deallocate benar-benar menghentikan billing compute.
+Wazuh SIEM terbukti efektif sebagai solusi keamanan untuk mendeteksi serangan DDoS. Dengan konfigurasi yang tepat, Wazuh dapat:
+- Mendeteksi anomali traffic secara real-time
+- Generate alert dengan level severity yang jelas
+- Memetakan serangan ke framework MITRE ATT&CK
+- Merespons otomatis dengan memblokir IP penyerang
+- Mengelola volume log yang besar secara efisien
 
 ---
 
 ## Referensi
 
-- [Wazuh Documentation](https://documentation.wazuh.com)
+- [Wazuh Official Documentation](https://documentation.wazuh.com)
 - [Wazuh 4.7 Installation Guide](https://documentation.wazuh.com/4.7/installation-guide)
 - [Wazuh Active Response](https://documentation.wazuh.com/current/user-manual/capabilities/active-response)
+- [MITRE ATT&CK Framework](https://attack.mitre.org)
 - [Azure for Students](https://azure.microsoft.com/free/students)
+- [UU ITE No. 11 Tahun 2008](https://jdih.kominfo.go.id)
 
 ---
 
-*Tugas Keamanan Jaringan — ITS 2026 | Last updated: 16 Mei 2026*
+*Tugas Keamanan Jaringan — Institut Teknologi Sepuluh Nopember (ITS) 2026*

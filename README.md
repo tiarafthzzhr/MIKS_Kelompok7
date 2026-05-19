@@ -236,6 +236,8 @@ ab -n 50000 -c 200 http://localhost/
 ```
 
 **Hasil:** Traffic anomali terdeteksi, alert muncul di Dashboard
+![Uploading Screenshot 2026-05-17 235606.png…]()
+
 
 ---
 

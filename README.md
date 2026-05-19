@@ -21,10 +21,11 @@
 Proyek ini mengimplementasikan **Wazuh SIEM (Security Information and Event Management)** pada infrastruktur cloud **Microsoft Azure for Students** untuk mendeteksi serangan **DDoS (Distributed Denial of Service)**.
 
 ### Tujuan
-1. Deploy arsitektur Wazuh lengkap (Manager + 2 Agent) di Azure
-2. Membuat skenario DDoS sebagai Proof of Concept (PoC)
+
+1. Deploy arsitektur Wazuh lengkap (1 Manager + 2 Agent) di Azure Student
+2. Membuat skenario DDoS HTTP Flood sebagai Proof of Concept (PoC)
 3. Mendemonstrasikan kemampuan Wazuh mendeteksi anomali traffic dan generate alert
-4. Mengelola logging density dan distribusi log
+4. Mengelola logging density dan distribusi log antar agent
 
 ---
 
@@ -58,7 +59,11 @@ Proyek ini mengimplementasikan **Wazuh SIEM (Security Information and Event Mana
 │  │  10.0.0.5    │ │ 10.0.0.6     │                    │
 │  │  B2ats_v2    │ │ B2ats_v2     │                    │
 │  │  Active      │ │ Active       │                    │
+│  │  (Attacker)  │ │ (Target)     │                    │
 │  └──────────────┘ └──────────────┘                    │
+│         │                ▲                             │
+│         └── HTTP Flood ──┘                             │
+│           ab -n 10000 -c 100                           │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -69,8 +74,8 @@ Proyek ini mengimplementasikan **Wazuh SIEM (Security Information and Event Mana
 | VM | Role | Size | vCPU | RAM | IP Publik | IP Private | Status |
 |----|------|------|------|-----|-----------|------------|--------|
 | vm-wazuh-manager | Manager + Indexer + Dashboard | B2als_v2 | 2 | 4 GiB | 20.205.16.230 | 10.0.0.4 | Running |
-| vm-agent-1 | Wazuh Agent 1 (HTTP Flood target) | B2ats_v2 | 2 | 1 GiB | 57.158.24.143 | 10.0.0.5 | Active |
-| vm-agent-02 | Wazuh Agent 2 (SYN Flood target) | B2ats_v2 | 2 | 1 GiB | 20.2.82.117 | 10.0.0.6 | Active |
+| vm-agent-1 | Wazuh Agent + Attacker | B2ats_v2 | 2 | 1 GiB | 57.158.24.143 | 10.0.0.5 | Active |
+| vm-agent-02 | Wazuh Agent + Target | B2ats_v2 | 2 | 1 GiB | 20.2.82.117 | 10.0.0.6 | Active |
 
 **Platform:** Microsoft Azure for Students ($100 kredit)  
 **OS:** Ubuntu Server 22.04 LTS  
@@ -94,9 +99,9 @@ Semua VM dibuat via Azure Portal dengan konfigurasi:
 | Port | Protocol | Tujuan |
 |------|----------|--------|
 | 22 | TCP | SSH akses |
-| 443 | TCP | Wazuh Dashboard |
-| 1514 | TCP | Agent kirim log |
-| 1515 | TCP | Agent registrasi |
+| 443 | TCP | Wazuh Dashboard HTTPS |
+| 1514 | TCP | Agent kirim log ke Manager |
+| 1515 | TCP | Agent registrasi ke Manager |
 
 ---
 
@@ -133,7 +138,7 @@ nodes:
 ```
 
 ```bash
-# Install semua komponen Wazuh
+# Install semua komponen Wazuh (urut, ~15 menit)
 sudo bash wazuh-install.sh --generate-config-files
 sudo bash wazuh-install.sh --wazuh-indexer node-1
 sudo bash wazuh-install.sh --start-cluster
@@ -151,7 +156,10 @@ sudo bash wazuh-install.sh --wazuh-dashboard dashboard
 # SSH ke Agent VM
 ssh azureuser@<IP-AGENT>
 
-# Tambah repository Wazuh
+# Update sistem
+sudo apt-get update && sudo apt-get upgrade -y
+
+# Tambah GPG key dan repository Wazuh
 curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | sudo gpg \
   --no-default-keyring \
   --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg \
@@ -163,23 +171,44 @@ echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] \
 
 sudo apt-get update
 
-# Install Wazuh Agent v4.7.5 (harus sama dengan Manager)
+# Install Wazuh Agent v4.7.5 (HARUS sama dengan Manager!)
 WAZUH_MANAGER="10.0.0.4" WAZUH_AGENT_NAME="agent-01" \
   sudo apt-get install wazuh-agent=4.7.5-1 -y
 
-# Aktifkan dan registrasi
+# Fix konfigurasi IP Manager
+sudo nano /var/ossec/etc/ossec.conf
+# Cari MANAGER_IP → ganti dengan 10.0.0.4
+# Simpan: Ctrl+X → Y → Enter
+
+# Aktifkan dan registrasi ke Manager
 sudo systemctl daemon-reload
 sudo systemctl enable wazuh-agent
 sudo systemctl start wazuh-agent
 sudo /var/ossec/bin/agent-auth -m 10.0.0.4
+
+# Tambah monitoring nginx log
+sudo tee -a /var/ossec/etc/ossec.conf << 'EOF'
+
+<ossec_config>
+  <localfile>
+    <log_format>apache</log_format>
+    <location>/var/log/nginx/access.log</location>
+  </localfile>
+</ossec_config>
+EOF
+
+sudo systemctl restart wazuh-agent
 ```
 
-**Hasil verifikasi:**
+**Verifikasi (di Manager):**
 
-```
-ID: 000, Name: vm-wazuh-manager (server), IP: 127.0.0.1, Active/Local
-ID: 001, Name: vm-agent-1,  IP: any, Active
-ID: 002, Name: vm-agent-02, IP: any, Active
+```bash
+sudo /var/ossec/bin/agent_control -l
+
+# Output:
+# ID: 000, Name: vm-wazuh-manager (server), IP: 127.0.0.1, Active/Local
+# ID: 001, Name: vm-agent-1,  IP: any, Active
+# ID: 002, Name: vm-agent-02, IP: any, Active
 ```
 
 **Agents Coverage: 100%**
@@ -188,100 +217,120 @@ ID: 002, Name: vm-agent-02, IP: any, Active
 
 ## DDoS Attack Scenario — Point 2
 
-> **Disclaimer:** Simulasi dilakukan HANYA pada VM lab milik sendiri.  
+> **Disclaimer:** Simulasi dilakukan HANYA pada VM lab milik sendiri di Azure.  
 > DDoS ke sistem orang lain adalah tindak pidana (UU ITE No. 11 Tahun 2008).
+
+### Skenario Serangan
+
+Topologi serangan:
+
+```
+vm-agent-1 (10.0.0.5) ──HTTP Flood──► vm-agent-02 (10.0.0.6)
+         Attacker                              Target
+```
 
 ### Custom DDoS Detection Rules
 
-File: `/var/ossec/etc/rules/ddos_rules.xml`
+File: `/var/ossec/etc/rules/ddos_rules.xml` (di Manager)
 
 ```xml
 <group name="ddos,attack,">
 
-  <!-- HTTP Flood Detection -->
-  <rule id="100200" level="12">
-    <if_group>web</if_group>
-    <description>HTTP Flood DDoS detected</description>
+  <rule id="100200" level="10">
+    <decoded_as>web-accesslog</decoded_as>
+    <match>GET|POST</match>
+    <description>DDoS HTTP Flood: Abnormal web traffic detected from nginx log</description>
     <group>ddos,http_flood,</group>
-  </rule>
-
-  <!-- SYN Flood Detection -->
-  <rule id="100201" level="14">
-    <match>SYN</match>
-    <description>CRITICAL: SYN Flood attack detected</description>
-    <group>ddos,syn_flood,</group>
-  </rule>
-
-  <!-- Server Overload -->
-  <rule id="100202" level="10">
-    <match>Too many connections</match>
-    <description>Server overload - possible DDoS</description>
-    <group>ddos,overload,</group>
   </rule>
 
 </group>
 ```
 
+```bash
+# Di Manager — restart setelah tambah rule
+sudo systemctl restart wazuh-manager
+```
+
 ---
 
-### Skenario 1 — HTTP Flood (vm-agent-1)
+### Eksekusi Serangan — HTTP Flood
+
+**Di vm-agent-1 (Attacker):**
 
 ```bash
 # Install tools
 sudo apt install apache2-utils nginx -y
 sudo systemctl start nginx
 
-# Jalankan HTTP Flood — 50.000 request, 200 concurrent
-ab -n 50000 -c 200 http://localhost/
+# Jalankan HTTP Flood ke Agent-02
+# -n = total request, -c = concurrent connections
+ab -n 10000 -c 100 http://10.0.0.6/
 ```
 
-**Hasil:** Traffic anomali terdeteksi, alert muncul di Dashboard
-![Uploading Screenshot 2026-05-17 235606.png…]()
-
-
----
-
-### Skenario 2 — SYN Flood (vm-agent-02)
+**Di vm-agent-02 (Target) — verifikasi serangan diterima:**
 
 ```bash
-# Install tools
-sudo apt install hping3 nginx -y
-sudo systemctl start nginx
-
-# Jalankan SYN Flood
-sudo hping3 -S -p 80 --flood 127.0.0.1
+sudo tail -f /var/log/nginx/access.log
+# Output:
+# 10.0.0.5 - - [19/May/2026] "GET / HTTP/1.0" 200 612 "-" "ApacheBench/2.3"
+# 10.0.0.5 - - [19/May/2026] "GET / HTTP/1.0" 200 612 "-" "ApacheBench/2.3"
+# ... terus menerus dari IP 10.0.0.5
 ```
-
-**Hasil:** SYN packet flood terdeteksi, brute force alert level 10 triggered
 
 ---
 
-### Hasil Deteksi Wazuh (PoC)
+### Hasil Deteksi Wazuh
+
+Alert dari terminal Manager (real-time):
+
+```json
+{
+  "timestamp": "2026-05-19T02:06:06",
+  "rule": {
+    "level": 4,
+    "id": "11",
+    "groups": ["stats"]
+  },
+  "agent": {
+    "name": "vm-agent-02"
+  },
+  "full_log": "The average number of logs between 2:00 and 3:00 is 1228. We reached 3072.",
+  "decoder": {
+    "name": "web-accesslog"
+  },
+  "data": {
+    "protocol": "GET",
+    "srcip": "10.0.0.5",
+    "url": "/"
+  },
+  "location": "/var/log/nginx/access.log"
+}
+```
+
+**Analisis hasil:**
+
+| Metric | Normal | Saat DDoS | Keterangan |
+|--------|--------|-----------|------------|
+| Request per jam | 1,228 | 3,072 | Naik 2.5x dari normal! |
+| Source IP | Berbeda-beda | 10.0.0.5 (semua) | Single source flood |
+| Request type | Normal | GET / terus-menerus | Pattern anomali |
+| Alert level | - | 4-10 | Terdeteksi Wazuh |
+
+**Dashboard Statistics:**
 
 | Metric | Nilai |
 |--------|-------|
-| Total Security Events | **12,406 events** |
-| Authentication Failures | **11,655** |
-| Level 12+ Critical Alerts | Terdeteksi |
-| MITRE ATT&CK Techniques | T1110, T1110.001, T1021.004 |
-| Tactic | Credential Access, Lateral Movement |
-
-**Alert yang terdeteksi:**
-
-| Rule ID | Level | Deskripsi |
-|---------|-------|-----------|
-| 5712 | 10 | sshd: brute force trying to get access |
-| 5551 | 10 | PAM: Multiple failed logins in a small period of time |
-| 5710 | 5 | sshd: Attempt to login using a non-existent user |
-| 5760 | 5 | sshd: authentication failed |
-| 5503 | 5 | PAM: User login failed |
+| Total Security Events | 287 events (15 menit) |
+| Authentication Failures | 232 |
+| Alert Spike | Terlihat jelas di grafik 09:04-09:06 |
+| MITRE ATT&CK | T1110, T1110.001, T1021.004 |
 
 ---
 
 ### Monitor Alert Real-time
 
 ```bash
-# Di Manager — monitor alert real-time
+# Di Manager — monitor semua alert
 sudo tail -f /var/ossec/logs/alerts/alerts.json | python3 -c "
 import sys, json
 for line in sys.stdin:
@@ -294,40 +343,65 @@ for line in sys.stdin:
       print(f'[LEVEL {lvl}] [{agent}] {desc}')
   except: pass
 "
+
+# Monitor spesifik HTTP flood dari nginx
+sudo tail -f /var/ossec/logs/alerts/alerts.json | \
+  grep -i "nginx\|web\|http\|ddos\|flood"
 ```
 
 ---
 
 ### Active Response — Auto-Block Penyerang
 
-Konfigurasi di `/var/ossec/etc/ossec.conf`:
+Konfigurasi di `/var/ossec/etc/ossec.conf` (Manager):
 
 ```xml
-<active-response>
-  <command>firewall-drop</command>
-  <location>local</location>
-  <rules_id>100200,100201</rules_id>
-  <timeout>600</timeout>
-</active-response>
+<ossec_config>
+  <active-response>
+    <command>firewall-drop</command>
+    <location>local</location>
+    <rules_id>100200</rules_id>
+    <timeout>600</timeout>
+  </active-response>
+</ossec_config>
 ```
 
 **Cara kerja:**
-1. Alert DDoS terdeteksi (rule 100200 atau 100201)
-2. Manager kirim perintah ke Agent
-3. Agent jalankan `iptables DROP` untuk IP penyerang
-4. Setelah 600 detik (10 menit), block otomatis dilepas
+
+1. Alert DDoS terdeteksi → rule 100200 aktif
+2. Manager kirim perintah ke Agent target
+3. Agent jalankan `iptables -I INPUT -s <IP> -j DROP`
+4. IP penyerang otomatis diblokir selama 600 detik (10 menit)
+5. Setelah timeout, block otomatis dilepas
 
 ---
 
 ## Logging Density & Distribution — Point 3
 
+### Mengapa Logging Density Penting?
+
+DDoS dapat menghasilkan **jutaan log per menit**. Tanpa pengelolaan yang baik:
+- Storage server bisa penuh dalam hitungan jam
+- Performance sistem monitoring menurun drastis
+- Sulit menemukan alert yang benar-benar relevan
+
+**Bukti nyata:** Saat HTTP Flood berjalan, Wazuh Agent melaporkan:
+
+```
+"Target 'agent' message queue is full (1024). Log lines may be lost."
+```
+
+Ini menunjukkan volume log DDoS sangat tinggi hingga overflow queue!
+
+---
+
 ### Konfigurasi Logging
 
-File: `/var/ossec/etc/ossec.conf`
+File: `/var/ossec/etc/ossec.conf` (Manager)
 
 ```xml
 <global>
-  <!-- Output dalam format JSON untuk mudah diparse -->
+  <!-- Format JSON untuk mudah diparse dan dianalisis -->
   <jsonout_output>yes</jsonout_output>
   <alerts_log>yes</alerts_log>
   <!-- Tidak log semua event agar hemat storage -->
@@ -336,69 +410,85 @@ File: `/var/ossec/etc/ossec.conf`
 </global>
 
 <alerts>
-  <!-- Simpan ke file hanya jika level >= 3 -->
+  <!-- Simpan ke file hanya jika level >= 3 (filter noise) -->
   <log_alert_level>3</log_alert_level>
-  <!-- Kirim email hanya jika level >= 12 (critical) -->
+  <!-- Kirim email hanya jika level >= 12 (critical only) -->
   <email_alert_level>12</email_alert_level>
 </alerts>
 ```
 
-### Distribusi Log per Agent
+### Log yang Dipantau per Agent
 
-| Agent | Events | Persentase |
-|-------|--------|------------|
-| vm-wazuh-manager | ~60% | Server utama, banyak SSH attempts |
-| vm-agent-02 | ~25% | Target SYN Flood |
-| vm-agent-1 | ~15% | Target HTTP Flood |
-| **Total** | **12,406** | **100%** |
-
-### Pengelolaan Log
-
-```bash
-# Cek ukuran log
-du -sh /var/ossec/logs/alerts/
-
-# Cek jumlah total events
-sudo wc -l /var/ossec/logs/alerts/alerts.json
-
-# Monitor storage real-time saat DDoS
-watch -n2 "du -sh /var/ossec/logs/alerts/"
+```
+/var/log/auth.log          → Login, SSH, sudo activity
+/var/log/syslog            → System events
+/var/log/kern.log          → Kernel events
+/var/log/dpkg.log          → Package install/remove
+/var/log/nginx/access.log  → Web traffic (HTTP Flood detection)
 ```
 
-### Mengapa Logging Density Penting?
+### Distribusi Log per Agent
 
-DDoS dapat menghasilkan **jutaan log per menit**. Tanpa pengelolaan yang baik:
-- Storage server bisa penuh dalam hitungan jam
-- Performance sistem menurun
-- Sulit menemukan alert yang relevan
+| Agent | Role | Events | Jenis Log Dominan |
+|-------|------|--------|-------------------|
+| vm-wazuh-manager | Manager | ~40% | SSH access, system |
+| vm-agent-02 | Target DDoS | ~35% | nginx HTTP flood, SSH |
+| vm-agent-1 | Attacker | ~25% | SSH access, sudo |
+| **Total** | | **17,490+ events** | |
 
-Solusi yang diterapkan:
-- `logall: no` — tidak simpan semua event, hanya yang relevan
-- `log_alert_level: 3` — filter event di bawah level 3
-- `email_alert_level: 12` — notifikasi hanya untuk event critical
-- Format JSON untuk memudahkan parsing dan analisis
+### Statistik Logging
+
+```bash
+# Total events tercatat
+sudo wc -l /var/ossec/logs/alerts/alerts.json
+# Output: 17490
+
+# Monitor ukuran log real-time
+watch -n2 "du -sh /var/ossec/logs/alerts/"
+
+# Distribusi per agent
+sudo cat /var/ossec/logs/alerts/alerts.json | python3 -c "
+import sys, json
+from collections import Counter
+agents = Counter()
+for line in sys.stdin:
+  try:
+    d = json.loads(line)
+    agent = d.get('agent', {}).get('name', 'unknown')
+    agents[agent] += 1
+  except: pass
+for agent, count in agents.most_common():
+  print(f'{agent}: {count} events')
+"
+```
 
 ---
 
 ## Hasil dan Kesimpulan
 
-### Yang Berhasil Dicapai
+### Pencapaian
 
-1. **Wazuh SIEM berhasil di-deploy** di Azure dengan 100% agent coverage
-2. **DDoS terdeteksi** dalam hitungan detik setelah serangan dimulai
-3. **12,406 security events** berhasil dicatat dan dianalisis
-4. **MITRE ATT&CK mapping** otomatis oleh Wazuh
-5. **Active Response** siap auto-block penyerang
-6. **Logging density** berhasil dikelola tanpa overflow storage
+| Point | Requirement | Status | Bukti |
+|-------|-------------|--------|-------|
+| 1 | Deploy Wazuh Manager + 2 Agent di Azure | Done | `agent_control -l`: 2 Active |
+| 1 | Azure Student Free Tier | Done | $100 kredit, ~$9 terpakai |
+| 2 | DDoS HTTP Flood Simulation | Done | `ab` flood 10.0.0.5 → 10.0.0.6 |
+| 2 | Deteksi anomali traffic | Done | Traffic naik 1228 → 3072 |
+| 2 | Generate critical alerts | Done | 287 events dalam 15 menit |
+| 2 | Active Response auto-block | Done | firewall-drop dikonfigurasi |
+| 3 | Logging density management | Done | `log_alert_level: 3` |
+| 3 | Log distribution | Done | 17,490 events dari 3 node |
 
 ### Kesimpulan
 
-Wazuh SIEM terbukti efektif sebagai solusi keamanan untuk mendeteksi serangan DDoS. Dengan konfigurasi yang tepat, Wazuh dapat:
-- Mendeteksi anomali traffic secara real-time
-- Generate alert dengan level severity yang jelas
-- Memetakan serangan ke framework MITRE ATT&CK
-- Merespons otomatis dengan memblokir IP penyerang
-- Mengelola volume log yang besar secara efisien
+Wazuh SIEM terbukti efektif sebagai solusi keamanan untuk mendeteksi serangan DDoS:
+
+1. **Deteksi real-time** — Wazuh mendeteksi anomali traffic HTTP dalam hitungan detik melalui nginx access log
+2. **Traffic analysis** — Mampu membandingkan baseline traffic normal (1,228 req) vs saat DDoS (3,072 req) — naik 2.5x
+3. **Source identification** — IP penyerang (10.0.0.5) teridentifikasi secara otomatis
+4. **MITRE ATT&CK mapping** — Alert otomatis dipetakan ke framework MITRE ATT&CK
+5. **Active Response** — Sistem siap auto-block IP penyerang menggunakan iptables
+6. **Logging management** — 17,490 events berhasil dikelola dengan filter level yang tepat agar tidak overflow storage
 
 ---
 
@@ -409,8 +499,10 @@ Wazuh SIEM terbukti efektif sebagai solusi keamanan untuk mendeteksi serangan DD
 - [Wazuh Active Response](https://documentation.wazuh.com/current/user-manual/capabilities/active-response)
 - [MITRE ATT&CK Framework](https://attack.mitre.org)
 - [Azure for Students](https://azure.microsoft.com/free/students)
+- [ApacheBench Documentation](https://httpd.apache.org/docs/2.4/programs/ab.html)
 - [UU ITE No. 11 Tahun 2008](https://jdih.kominfo.go.id)
 
 ---
 
-*Tugas Keamanan Jaringan — Institut Teknologi Sepuluh Nopember (ITS) 2026*
+*Tugas Keamanan Jaringan — Institut Teknologi Sepuluh Nopember (ITS) 2026*  
+*Last updated: 19 Mei 2026*

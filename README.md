@@ -321,11 +321,11 @@ ab -n 10000 -c 100 http://10.0.0.6/
 |-----------|-------|------|
 | `ab` | - | Apache Benchmark — tool pengirim HTTP request |
 | `-n 10000` | 10.000 | Total request yang dikirim ke korban |
-| `-c 100` | 100 | Jumlah request yang dikirim bersamaan setiap saat |
+| `-c 100` | 100 | Jumlah request yang dikirim **bersamaan** setiap saat |
 | `http://10.0.0.6/` | IP Agent-02 | Alamat target yang diserang |
 
 **Kenapa dijalankan:**  
-Ini adalah inti simulasi DDoS HTTP Flood. Agent-01 membanjiri web server nginx Agent-02 dengan 10.000 request secara terus menerus — seperti 100 orang menelepon secara bersamaan ke satu nomor sampai sibuk terus.
+Ini adalah inti simulasi DDoS HTTP Flood. Agent-01 membanjiri web server nginx Agent-02 dengan 10.000 request secara terus menerus — seperti 100 orang menelepon secara bersamaan ke satu nomor sampai operator kewalahan.
 
 **Output saat serangan berjalan:**
 
@@ -371,13 +371,13 @@ Setelah DDoS : kembali 0
          ↓
 2. 10.000 HTTP request dikirim ke Agent-02
          ↓
-3. Nginx Agent-02 terima request dan catat di access.log
+3. Nginx Agent-02 terima request → catat di access.log
          ↓
-4. Wazuh Agent Agent-02 baca nginx log secara real-time
+4. Wazuh Agent Agent-02 baca nginx log real-time
          ↓
 5. Log dikirim ke Manager via port 1514
          ↓
-6. Manager analisa: traffic naik dari 1.228 → 3.072 req/jam!
+6. Manager analisa → traffic naik 1.228 → 3.072 req/jam!
          ↓
 7. Alert level 12 (CRITICAL) di-generate
          ↓
@@ -386,15 +386,7 @@ Setelah DDoS : kembali 0
 
 ---
 
-### Monitor Alert Real-time
-
-```bash
-# Di Manager — filter khusus DDoS dari Agent-01
-sudo tail -f /var/ossec/logs/alerts/alerts.json | \
-  grep -i "nginx\|web\|http\|ddos\|10.0.0.5"
-```
-
-**Alert yang muncul:**
+### Alert yang Terdeteksi
 
 ```json
 {
@@ -417,8 +409,6 @@ sudo tail -f /var/ossec/logs/alerts/alerts.json | \
 
 ### Active Response — Auto-Block Penyerang
 
-Konfigurasi di `/var/ossec/etc/ossec.conf` (Manager):
-
 ```xml
 <ossec_config>
   <active-response>
@@ -433,10 +423,10 @@ Konfigurasi di `/var/ossec/etc/ossec.conf` (Manager):
 **Cara kerja:**
 
 1. Alert DDoS terdeteksi → rule 100200 aktif
-2. Manager kirim perintah block ke Agent-02 (target)
+2. Manager kirim perintah block ke Agent-02
 3. Agent-02 jalankan `iptables -I INPUT -s 10.0.0.5 -j DROP`
-4. Semua traffic dari Agent-01 otomatis dibuang
-5. Setelah 600 detik (10 menit), block otomatis dilepas
+4. Semua traffic dari Agent-01 otomatis dibuang selama 10 menit
+5. Setelah timeout, block otomatis dilepas
 
 ---
 
@@ -450,7 +440,7 @@ DDoS menghasilkan **ribuan log per detik**. Tanpa pengelolaan yang baik:
 - Alert penting tenggelam di antara noise log
 
 **Bukti nyata dari eksperimen:**  
-Saat HTTP Flood berjalan, Wazuh Agent melaporkan:
+Saat HTTP Flood berjalan, Wazuh melaporkan:
 
 ```
 "Target 'agent' message queue is full (1024). Log lines may be lost."
@@ -468,47 +458,106 @@ File: `/var/ossec/etc/ossec.conf` (Manager)
 <global>
   <jsonout_output>yes</jsonout_output>
   <alerts_log>yes</alerts_log>
+  <!-- Tidak log SEMUA event → hemat storage -->
   <logall>no</logall>
   <logall_json>no</logall_json>
 </global>
 
 <alerts>
-  <!-- Simpan ke file hanya jika level >= 3 (filter noise) -->
+  <!-- Simpan ke file hanya jika level >= 3 -->
+  <!-- Level 1-2 terlalu kecil → dibuang (filter noise) -->
   <log_alert_level>3</log_alert_level>
-  <!-- Kirim email hanya jika level >= 12 (critical only) -->
+  <!-- Email hanya dikirim jika level >= 12 (CRITICAL) -->
   <email_alert_level>12</email_alert_level>
 </alerts>
 ```
 
+---
+
+### Hasil Nyata — Distribusi Log per Agent
+
+```bash
+# Command yang dijalankan di Manager:
+sudo cat /var/ossec/logs/alerts/alerts.json | python3 -c "
+import sys, json
+from collections import Counter
+agents = Counter()
+for line in sys.stdin:
+  try:
+    d = json.loads(line)
+    agent = d.get('agent', {}).get('name', 'unknown')
+    agents[agent] += 1
+  except: pass
+for agent, count in agents.most_common():
+  print(f'{agent}: {count} events')
+"
+```
+
+**Hasil:**
+
+| Agent | Events | Persentase | Keterangan |
+|-------|--------|------------|------------|
+| vm-agent-02 | **6,791** | 46% | Target DDoS — paling banyak log |
+| vm-agent-1 | **4,839** | 33% | Attacker — banyak aktivitas |
+| vm-wazuh-manager | **2,972** | 20% | Manager — log sistem |
+| **Total** | **14,596** | 100% | |
+
+---
+
+### Hasil Nyata — Distribusi Level Alert
+
+```bash
+# Command yang dijalankan di Manager:
+sudo cat /var/ossec/logs/alerts/alerts.json | python3 -c "
+import sys, json
+from collections import Counter
+levels = Counter()
+for line in sys.stdin:
+  try:
+    d = json.loads(line)
+    lvl = d.get('rule', {}).get('level', 0)
+    levels[lvl] += 1
+  except: pass
+print('Distribusi level alert:')
+for lvl, count in sorted(levels.items()):
+  print(f'Level {lvl}: {count} events')
+"
+```
+
+**Hasil:**
+
+| Level | Events | Keterangan |
+|-------|--------|------------|
+| Level 3 | 927 | Minimum level tersimpan |
+| Level 4 | 161 | HTTP flood detection (nginx) |
+| Level 5 | 9,450 | SSH attempts dari internet |
+| Level 7 | 17 | Medium alerts |
+| Level 8 | 55 | High alerts |
+| Level 9 | 3 | High alerts |
+| Level 10 | 690 | Brute force critical |
+| Level 12 | **3,309** | **DDoS HTTP Flood CRITICAL!** |
+| Level 1 & 2 | **0** | **Tidak ada → filter bekerja!** |
+
+**Kesimpulan Logging Density:**
+
+```
+Level 1 & 2 = 0  → log_alert_level: 3 bekerja dengan baik
+Level 12: 3,309  → semua dari DDoS simulation kita
+vm-agent-02: 46% → wajar sebagai target DDoS
+Total 14,596 events dikelola efisien tanpa overflow storage
+```
+
+---
+
 ### Log yang Dipantau per Agent
 
-| Log File | Isi | Relevansi |
-|----------|-----|-----------|
+| Log File | Isi | Relevansi DDoS |
+|----------|-----|----------------|
 | `/var/log/auth.log` | Login, SSH, sudo | Deteksi brute force |
 | `/var/log/syslog` | System events | General monitoring |
 | `/var/log/kern.log` | Kernel events | System health |
 | `/var/log/dpkg.log` | Package install | Perubahan software |
 | `/var/log/nginx/access.log` | HTTP requests | **Deteksi DDoS** |
-
-### Distribusi Log
-
-| Agent | Role | Events | Persentase |
-|-------|------|--------|------------|
-| vm-wazuh-manager | Monitor | ~40% | SSH access, system |
-| vm-agent-02 | Target DDoS | ~35% | nginx flood, SSH |
-| vm-agent-1 | Attacker | ~25% | SSH access, sudo |
-| **Total** | | **17,490+ events** | 100% |
-
-### Statistik Logging
-
-```bash
-# Total events tercatat
-sudo wc -l /var/ossec/logs/alerts/alerts.json
-# Output: 17490
-
-# Monitor ukuran log real-time
-watch -n2 "du -sh /var/ossec/logs/alerts/"
-```
 
 ---
 
@@ -516,17 +565,17 @@ watch -n2 "du -sh /var/ossec/logs/alerts/"
 
 ### Ringkasan Pencapaian
 
-| Point | Requirement | Status | Bukti |
-|-------|-------------|--------|-------|
-| 1 | Deploy Wazuh Manager | Done | Service running, Dashboard accessible |
-| 1 | Deploy 2 Server Agent | Done | agent_control: 2 Active, coverage 100% |
+| Point | Requirement | Status | Hasil Nyata |
+|-------|-------------|--------|-------------|
+| 1 | Deploy Wazuh Manager | Done | Service running, Dashboard `https://20.205.16.230` |
+| 1 | Deploy 2 Server Agent | Done | 2 Active, coverage 100% |
 | 1 | Azure Student Free Tier | Done | $100 kredit, ~$9 terpakai |
-| 2 | DDoS HTTP Flood Simulation | Done | ab flood 10.0.0.5 → 10.0.0.6 |
-| 2 | Deteksi anomali traffic | Done | Traffic spike 1228 → 3072 req/jam |
-| 2 | Generate critical alerts | Done | 3,309 level 12 alerts |
+| 2 | DDoS HTTP Flood Simulation | Done | 10.000 request dari 10.0.0.5 → 10.0.0.6 |
+| 2 | Deteksi anomali traffic | Done | Traffic spike 1.228 → 3.072 req/jam (naik 2.5x) |
+| 2 | Generate critical alerts | Done | 3,309 level 12 CRITICAL alerts |
 | 2 | Active Response auto-block | Done | firewall-drop dikonfigurasi |
-| 3 | Logging density management | Done | log_alert_level: 3, logall: no |
-| 3 | Log distribution | Done | 17,490+ events dari 3 node |
+| 3 | Logging density management | Done | Level 1&2 = 0, filter log_alert_level: 3 bekerja |
+| 3 | Log distribution | Done | 14,596 events terdistribusi dari 3 node |
 
 ### Kesimpulan
 
@@ -538,7 +587,7 @@ Wazuh SIEM terbukti efektif mendeteksi serangan DDoS:
 4. **Critical alerts** — 3,309 alert level 12 (CRITICAL) ter-generate dalam waktu singkat
 5. **Visual evidence** — Spike tajam terlihat jelas di grafik Dashboard jam 08:00-09:00
 6. **Active Response** — Sistem siap auto-block IP penyerang via iptables
-7. **Log management** — 17,490+ events dikelola efisien tanpa overflow storage
+7. **Log management** — 14,596 events dikelola efisien, level 1&2 difilter, tidak ada overflow storage
 
 ---
 
